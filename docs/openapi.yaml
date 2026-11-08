@@ -1,0 +1,1045 @@
+openapi: 3.0.3
+info:
+  title: read-aloud-agent API
+  version: 0.1.0
+  description: |
+    本地单机版朗读 Agent 的 HTTP API 契约（v0.1）。
+
+    - 默认仅监听 `127.0.0.1`，无鉴权，单人使用。
+    - 所有时间为 ISO8601 UTC 字符串。
+    - 长任务（解析、纠错、批量合成、导出）返回 Job，进度通过 SSE 推送。
+    - 音频接口支持 HTTP Range，便于浏览器拖动播放。
+
+servers:
+  - url: http://127.0.0.1:8765
+
+tags:
+  - name: projects
+  - name: books
+  - name: chapters
+  - name: segments
+  - name: characters
+  - name: voices
+  - name: issues
+  - name: jobs
+  - name: exports
+  - name: settings
+  - name: events
+
+paths:
+  # ------------------------------------------------------------ projects
+  /api/projects:
+    get:
+      tags: [projects]
+      summary: 项目列表
+      parameters:
+        - name: status
+          in: query
+          schema: {type: string, enum: [active, archived]}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Project"}
+    post:
+      tags: [projects]
+      summary: 创建项目
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProjectCreate"}
+            example: {title: "红楼梦", language: "zh-CN"}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+
+  /api/projects/{project_id}:
+    get:
+      tags: [projects]
+      summary: 项目详情
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+    patch:
+      tags: [projects]
+      summary: 更新项目
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProjectPatch"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+    delete:
+      tags: [projects]
+      summary: 删除项目（级联删除章节/段落/音频记录）
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "204":
+          description: Deleted
+
+  # ------------------------------------------------------------ books
+  /api/projects/{project_id}/books:
+    post:
+      tags: [books]
+      summary: 上传电子书并触发解析
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: EPUB 或 TXT 文件
+      responses:
+        "201":
+          description: 已接收，解析任务已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  book: {$ref: "#/components/schemas/Book"}
+                  job: {$ref: "#/components/schemas/Job"}
+
+  /api/books/{book_id}:
+    get:
+      tags: [books]
+      summary: 书籍详情
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Book"}
+
+  /api/books/{book_id}/chapters:
+    get:
+      tags: [books]
+      summary: 章节列表
+      parameters:
+        - $ref: "#/components/parameters/BookId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Chapter"}
+
+  # ------------------------------------------------------------ chapters
+  /api/chapters/{chapter_id}:
+    get:
+      tags: [chapters]
+      summary: 章节详情
+      parameters:
+        - $ref: "#/components/parameters/ChapterId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Chapter"}
+
+  /api/chapters/{chapter_id}/pipeline:
+    post:
+      tags: [chapters]
+      summary: 启动章节流水线（可指定阶段）
+      parameters:
+        - $ref: "#/components/parameters/ChapterId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PipelineRequest"}
+            example:
+              stages: [proofread, extract_characters, attribute_speakers, tag, synthesize, asr_check]
+      responses:
+        "202":
+          description: 已入队
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Job"}
+
+  /api/chapters/{chapter_id}/segments:
+    get:
+      tags: [chapters]
+      summary: 章节段落列表
+      parameters:
+        - $ref: "#/components/parameters/ChapterId"
+        - name: status
+          in: query
+          schema: {type: string}
+        - name: kind
+          in: query
+          schema: {type: string, enum: [narration, dialogue, heading, other]}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Segment"}
+
+  /api/chapters/{chapter_id}/issues:
+    get:
+      tags: [chapters]
+      summary: 章节问题单
+      parameters:
+        - $ref: "#/components/parameters/ChapterId"
+        - name: status
+          in: query
+          schema: {type: string, enum: [open, accepted, rejected], default: open}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Issue"}
+
+  # ------------------------------------------------------------ segments
+  /api/segments/{segment_id}:
+    get:
+      tags: [segments]
+      summary: 段落详情
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Segment"}
+    patch:
+      tags: [segments]
+      summary: 修改文本 / 标签 / 说话人
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SegmentPatch"}
+            example:
+              text: "你听说了吗……昨晚，后山又出事了。"
+              tags: "（压低声音）你听说了吗……（停顿）昨晚，后山又出事了。"
+              speaker_id: 3
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Segment"}
+
+  /api/segments/{segment_id}/approve:
+    post:
+      tags: [segments]
+      summary: 人工通过该段落
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Segment"}
+
+  /api/segments/{segment_id}/lock:
+    post:
+      tags: [segments]
+      summary: 锁定 / 解锁段落
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LockRequest"}
+            example: {locked: true}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Segment"}
+
+  /api/segments/{segment_id}/synthesize:
+    post:
+      tags: [segments]
+      summary: 合成音频（可指定音色与导演指令）
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SynthesizeRequest"}
+            example: {voice_id: 7, context: "雨夜，低声说话，带一点不安"}
+      responses:
+        "202":
+          description: 已入队
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Job"}
+
+  /api/segments/{segment_id}/audio:
+    get:
+      tags: [segments]
+      summary: 获取音频（支持 Range）
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+        - name: version_id
+          in: query
+          description: 不传则返回最新可用版本
+          schema: {type: integer}
+      responses:
+        "200":
+          description: 完整音频
+          content:
+            audio/wav:
+              schema: {type: string, format: binary}
+        "206":
+          description: 分段音频（Range 请求）
+        "404":
+          description: 尚无音频
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/segments/{segment_id}/audio-versions:
+    get:
+      tags: [segments]
+      summary: 音频版本列表
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/AudioVersion"}
+
+  /api/segments/{segment_id}/asr:
+    get:
+      tags: [segments]
+      summary: 最新 ASR 回检结果
+      parameters:
+        - $ref: "#/components/parameters/SegmentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AsrResult"}
+
+  # ------------------------------------------------------------ issues
+  /api/issues/{issue_id}/accept:
+    post:
+      tags: [issues]
+      summary: 接受建议（写入文本）
+      parameters:
+        - $ref: "#/components/parameters/IssueId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Issue"}
+
+  /api/issues/{issue_id}/reject:
+    post:
+      tags: [issues]
+      summary: 拒绝建议
+      parameters:
+        - $ref: "#/components/parameters/IssueId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Issue"}
+
+  # ------------------------------------------------------------ characters
+  /api/projects/{project_id}/characters:
+    get:
+      tags: [characters]
+      summary: 角色列表（含旁白）
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Character"}
+    post:
+      tags: [characters]
+      summary: 新建角色
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CharacterCreate"}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Character"}
+
+  /api/characters/{character_id}:
+    get:
+      tags: [characters]
+      summary: 角色详情
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Character"}
+    patch:
+      tags: [characters]
+      summary: 修改角色档案
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CharacterPatch"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Character"}
+    delete:
+      tags: [characters]
+      summary: 删除角色（相关段落说话人置空）
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      responses:
+        "204":
+          description: Deleted
+
+  /api/characters/{character_id}/voices:
+    get:
+      tags: [voices]
+      summary: 角色音色候选/历史
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Voice"}
+
+  /api/characters/{character_id}/voice-candidates:
+    post:
+      tags: [voices]
+      summary: 生成音色候选（预置 / 文本设计 / 复用）
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/VoiceCandidatesRequest"}
+            example:
+              mode: design
+              description: "青年女性，声线清亮偏薄，吐字轻快"
+              count: 3
+      responses:
+        "202":
+          description: 已入队，完成后通过 SSE 通知并可在 voices 列表查看
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Job"}
+
+  /api/characters/{character_id}/voice-clone:
+    post:
+      tags: [voices]
+      summary: 上传样本创建克隆音色
+      parameters:
+        - $ref: "#/components/parameters/CharacterId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, consent_confirmed]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: mp3 或 wav，≤10MB
+                consent_confirmed:
+                  type: boolean
+                  description: 用户确认拥有该声音的使用授权
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Voice"}
+
+  /api/voices/{voice_id}:
+    get:
+      tags: [voices]
+      summary: 音色详情
+      parameters:
+        - $ref: "#/components/parameters/VoiceId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Voice"}
+    patch:
+      tags: [voices]
+      summary: 修改音色描述/参数
+      parameters:
+        - $ref: "#/components/parameters/VoiceId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/VoicePatch"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Voice"}
+
+  /api/voices/{voice_id}/approve:
+    post:
+      tags: [voices]
+      summary: 批准音色（角色进入 approved）
+      parameters:
+        - $ref: "#/components/parameters/VoiceId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Voice"}
+
+  /api/voices/{voice_id}/sample:
+    get:
+      tags: [voices]
+      summary: 试听样本音频
+      parameters:
+        - $ref: "#/components/parameters/VoiceId"
+      responses:
+        "200":
+          description: 样本音频
+          content:
+            audio/wav:
+              schema: {type: string, format: binary}
+
+  # ------------------------------------------------------------ jobs
+  /api/jobs/{job_id}:
+    get:
+      tags: [jobs]
+      summary: 任务状态
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Job"}
+
+  /api/jobs:
+    get:
+      tags: [jobs]
+      summary: 任务列表
+      parameters:
+        - name: project_id
+          in: query
+          schema: {type: integer}
+        - name: status
+          in: query
+          schema: {type: string, enum: [queued, running, done, failed, canceled]}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Job"}
+
+  # ------------------------------------------------------------ events
+  /api/projects/{project_id}/events:
+    get:
+      tags: [events]
+      summary: 项目事件流（SSE）
+      description: |
+        `text/event-stream`，事件体为 JSON（Event 结构）。
+        覆盖任务进度、段落状态、问题单、音色候选完成等变更。
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - name: last_event_id
+          in: query
+          description: 断线重连时从该事件之后继续
+          schema: {type: integer}
+      responses:
+        "200":
+          description: SSE 流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  # ------------------------------------------------------------ exports
+  /api/projects/{project_id}/export:
+    post:
+      tags: [exports]
+      summary: 导出有声书
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ExportRequest"}
+            example: {format: m4b, chapter_ids: [1, 2, 3]}
+      responses:
+        "202":
+          description: 已入队
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Export"}
+
+  /api/exports/{export_id}:
+    get:
+      tags: [exports]
+      summary: 导出状态
+      parameters:
+        - $ref: "#/components/parameters/ExportId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Export"}
+
+  /api/exports/{export_id}/download:
+    get:
+      tags: [exports]
+      summary: 下载导出文件
+      parameters:
+        - $ref: "#/components/parameters/ExportId"
+      responses:
+        "200":
+          description: 文件
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+
+  # ------------------------------------------------------------ settings
+  /api/settings:
+    get:
+      tags: [settings]
+      summary: 读取设置
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+    put:
+      tags: [settings]
+      summary: 保存设置
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Settings"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+
+  /api/settings/test-llm:
+    post:
+      tags: [settings]
+      summary: 测试 LLM 连通性
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider: {type: string, example: mimo}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  provider: {type: string}
+                  model: {type: string}
+                  latency_ms: {type: integer}
+        "502":
+          description: 上游失败
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+components:
+  parameters:
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema: {type: integer}
+    BookId:
+      name: book_id
+      in: path
+      required: true
+      schema: {type: integer}
+    ChapterId:
+      name: chapter_id
+      in: path
+      required: true
+      schema: {type: integer}
+    SegmentId:
+      name: segment_id
+      in: path
+      required: true
+      schema: {type: integer}
+    CharacterId:
+      name: character_id
+      in: path
+      required: true
+      schema: {type: integer}
+    VoiceId:
+      name: voice_id
+      in: path
+      required: true
+      schema: {type: integer}
+    IssueId:
+      name: issue_id
+      in: path
+      required: true
+      schema: {type: integer}
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: {type: integer}
+    ExportId:
+      name: export_id
+      in: path
+      required: true
+      schema: {type: integer}
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string, example: not_found}
+        message: {type: string}
+        details: {}
+
+    Project:
+      type: object
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        language: {type: string}
+        status: {type: string, enum: [active, archived]}
+        created_at: {type: string}
+        updated_at: {type: string}
+
+    ProjectCreate:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string}
+        language: {type: string, default: zh-CN}
+
+    ProjectPatch:
+      type: object
+      properties:
+        title: {type: string}
+        status: {type: string, enum: [active, archived]}
+
+    Book:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        format: {type: string, enum: [epub, txt]}
+        title: {type: string}
+        author: {type: string}
+        file_hash: {type: string}
+        created_at: {type: string}
+
+    Chapter:
+      type: object
+      properties:
+        id: {type: integer}
+        book_id: {type: integer}
+        index: {type: integer}
+        title: {type: string}
+        status: {type: string}
+        segment_count: {type: integer}
+        created_at: {type: string}
+
+    Segment:
+      type: object
+      properties:
+        id: {type: integer}
+        chapter_id: {type: integer}
+        index: {type: integer}
+        kind: {type: string, enum: [narration, dialogue, heading, other]}
+        speaker_id: {type: integer, nullable: true}
+        text_original: {type: string}
+        text_current: {type: string}
+        tags: {type: string, nullable: true}
+        status: {type: string}
+        locked: {type: boolean}
+        text_version: {type: integer}
+        tag_version: {type: integer}
+        updated_at: {type: string}
+
+    SegmentPatch:
+      type: object
+      properties:
+        text: {type: string}
+        tags: {type: string}
+        speaker_id: {type: integer, nullable: true}
+        kind: {type: string, enum: [narration, dialogue, heading, other]}
+
+    Character:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        name: {type: string}
+        aliases:
+          type: array
+          items: {type: string}
+        role_type: {type: string, enum: [narrator, protagonist, supporting, minor]}
+        profile:
+          type: object
+          properties:
+            gender: {type: string}
+            age_range: {type: string}
+            personality: {type: array, items: {type: string}}
+            speech_style: {type: string}
+            evidence: {type: array, items: {type: string}}
+        casting_status: {type: string, enum: [unassigned, proposed, sample_ready, approved]}
+        casting_method: {type: string, nullable: true, enum: [preset, design, clone, reuse]}
+
+    CharacterCreate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        aliases: {type: array, items: {type: string}}
+        role_type: {type: string, enum: [narrator, protagonist, supporting, minor]}
+        profile: {type: object}
+
+    CharacterPatch:
+      type: object
+      properties:
+        name: {type: string}
+        aliases: {type: array, items: {type: string}}
+        role_type: {type: string, enum: [narrator, protagonist, supporting, minor]}
+        profile: {type: object}
+
+    Voice:
+      type: object
+      properties:
+        id: {type: integer}
+        character_id: {type: integer}
+        mode: {type: string, enum: [preset, design, clone, reuse]}
+        preset_voice: {type: string, nullable: true}
+        description: {type: string, nullable: true}
+        status: {type: string, enum: [draft, candidate, approved, retired]}
+        source_character_id: {type: integer, nullable: true}
+        created_at: {type: string}
+
+    VoiceCandidatesRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode: {type: string, enum: [preset, design, reuse]}
+        preset: {type: string, description: 预置音色 ID，mode=preset 时使用}
+        description: {type: string, description: 音色描述，mode=design 时使用}
+        count: {type: integer, default: 3, minimum: 1, maximum: 5}
+        source_character_id: {type: integer, description: mode=reuse 时复用该角色的已批准音色}
+
+    VoicePatch:
+      type: object
+      properties:
+        description: {type: string}
+        preset_voice: {type: string}
+        params: {type: object}
+
+    Issue:
+      type: object
+      properties:
+        id: {type: integer}
+        segment_id: {type: integer, nullable: true}
+        chapter_id: {type: integer, nullable: true}
+        stage: {type: string}
+        type: {type: string, example: typo}
+        severity: {type: string, enum: [low, medium, high]}
+        original: {type: string, nullable: true}
+        suggested: {type: string, nullable: true}
+        confidence: {type: number}
+        status: {type: string, enum: [open, accepted, rejected]}
+        detail: {type: object}
+
+    Job:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        chapter_id: {type: integer, nullable: true}
+        stage: {type: string}
+        status: {type: string, enum: [queued, running, done, failed, canceled]}
+        progress: {type: number}
+        total: {type: integer}
+        done: {type: integer}
+        error: {type: string, nullable: true}
+        started_at: {type: string, nullable: true}
+        finished_at: {type: string, nullable: true}
+
+    PipelineRequest:
+      type: object
+      properties:
+        stages:
+          type: array
+          items:
+            type: string
+            enum: [proofread, extract_characters, attribute_speakers, tag, synthesize, asr_check]
+
+    SynthesizeRequest:
+      type: object
+      properties:
+        voice_id: {type: integer, description: 不传则使用角色已批准音色}
+        context: {type: string, description: 导演模式指令，仅本次合成生效}
+
+    LockRequest:
+      type: object
+      required: [locked]
+      properties:
+        locked: {type: boolean}
+
+    AudioVersion:
+      type: object
+      properties:
+        id: {type: integer}
+        segment_id: {type: integer}
+        voice_id: {type: integer, nullable: true}
+        duration_ms: {type: integer, nullable: true}
+        status: {type: string, enum: [ready, failed, stale]}
+        created_at: {type: string}
+
+    AsrResult:
+      type: object
+      properties:
+        id: {type: integer}
+        audio_version_id: {type: integer}
+        transcript: {type: string}
+        cer: {type: number}
+        verdict: {type: string, enum: [pass, warn, fail]}
+        error_types:
+          type: array
+          items: {type: string}
+        diff:
+          type: array
+          items: {type: object}
+        created_at: {type: string}
+
+    ExportRequest:
+      type: object
+      required: [format]
+      properties:
+        format: {type: string, enum: [mp3, m4b, srt_bundle]}
+        chapter_ids: {type: array, items: {type: integer}}
+
+    Export:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        format: {type: string}
+        status: {type: string, enum: [queued, running, done, failed]}
+        created_at: {type: string}
+
+    Settings:
+      type: object
+      properties:
+        llm:
+          type: object
+          properties:
+            default_provider: {type: string}
+            fallback: {type: array, items: {type: string}}
+            providers: {type: object}
+            routing: {type: object}
+        tts:
+          type: object
+          properties:
+            default_format: {type: string, default: wav}
+            max_chars_per_segment: {type: integer, default: 2500}
+        asr:
+          type: object
+          properties:
+            cer_pass: {type: number, default: 0.02}
+            cer_warn: {type: number, default: 0.05}
+            auto_retry: {type: integer, default: 2}
+
+    Event:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {type: string, example: segment.status_changed}
+        payload: {type: object}
+        created_at: {type: string}
